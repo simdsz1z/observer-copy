@@ -87,7 +87,9 @@ class DashboardTests(unittest.TestCase):
                 [(time.time(), "Word.exe", "focus", session["id"])] * 4,
             )
             conn.commit()
-        self.state.record_checkin({"focus_rating": 4, "progress": "partial", "outcome": "Private result"})
+        with closing(sqlite3.connect(dashboard.DB)) as conn:
+            conn.execute("INSERT INTO study_checkins(timestamp, session_id, focus_rating, progress, outcome) VALUES (?,?,?,?,?)", (time.time(), session["id"], 4, "partial", "Private result"))
+            conn.commit()
         sent = []
 
         def fake_open(request, timeout):
@@ -106,6 +108,7 @@ class DashboardTests(unittest.TestCase):
         self.assertNotIn("Word.exe", prompt)
         self.assertNotIn("focus_rating", prompt)
         self.assertNotIn("Private result", prompt)
+        self.assertIn("watched_project_event_counts", prompt)
 
     def test_minimax_key_is_encrypted_redacted_and_used_for_feedback(self):
         dummy_key = "dummy-minimax-key"
@@ -190,33 +193,25 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(overview["journal"]["subjects"][0]["subject"], "Project outline")
         self.assertIn("journal", overview["feedback"][0].lower())
 
-    def test_checkins_record_focus_and_concrete_progress_locally(self):
+    def test_session_evidence_is_observed_automatically(self):
         self.request("/api/study", {"goal": "Finish a report", "task": "Draft introduction", "focus_apps": [], "distraction_apps": []})
         self.request("/api/session/start", {})
         session = behavior.active_session(dashboard.DB)
+        now = time.time()
+        with closing(sqlite3.connect(dashboard.DB)) as conn:
+            conn.execute("INSERT INTO behavior_samples(timestamp, application, category, session_id) VALUES (?,?,?,?)", (now, "Word.exe", "unknown", session["id"]))
+            conn.execute("INSERT INTO events(timestamp, source, event_type) VALUES (?,'filesystem','file_edit')", (now,))
+            conn.commit()
+        active = self.request("/api/overview")[1]["behavior"]
+        self.assertEqual(active["project_events"]["file_edit"], 1)
+        self.assertEqual(active["minutes"]["unknown"], 0.5)
         with self.assertRaises(urllib.error.HTTPError):
             self.request("/api/checkin", {"focus_rating": 4, "progress": "complete", "outcome": ""})
-        self.assertEqual(behavior.summary(dashboard.DB, session)["checkins"]["count"], 0)
-        self.request("/api/checkin", {"focus_rating": 4, "progress": "partial", "outcome": "Drafted an outline"})
-        active = self.request("/api/overview")[1]["behavior"]["checkins"]
-        self.assertEqual(active["average_focus"], 4)
-        self.assertEqual(active["latest"]["outcome"], "Drafted an outline")
-        self.assertFalse(active["due"])
-        self.request("/api/session/end", {"focus_rating": 5, "progress": "complete", "outcome": "Wrote two pages"})
+        self.request("/api/session/end", {})
         overview = self.request("/api/overview")[1]
         self.assertIsNone(overview["behavior"]["session"])
-        self.assertEqual(overview["last_session_report"]["checkin_count"], 2)
-        self.assertEqual(overview["last_session_report"]["completed_reports"], 1)
-        self.assertEqual(overview["last_session_report"]["latest"]["outcome"], "Wrote two pages")
-
-    def test_checkin_becomes_due_after_twenty_minutes(self):
-        self.state.set_study({"goal": "Finish a report", "task": "Draft introduction", "focus_apps": [], "distraction_apps": []})
-        self.state.start_session()
-        session = behavior.active_session(dashboard.DB)
-        with closing(sqlite3.connect(dashboard.DB)) as conn:
-            conn.execute("UPDATE study_sessions SET started = ? WHERE id = ?", (time.time() - behavior.CHECKIN_SECONDS - 1, session["id"]))
-            conn.commit()
-        self.assertTrue(behavior.summary(dashboard.DB, behavior.active_session(dashboard.DB))["checkins"]["due"])
+        self.assertEqual(overview["last_session_report"]["project_file_edits"], 1)
+        self.assertEqual(overview["last_session_report"]["minutes"]["unknown"], 0.5)
 
 
 if __name__ == "__main__":

@@ -30,15 +30,13 @@ app every 30 seconds and marks the sample as focus, distraction, away, or
 unclassified. The session totals and seven-day heatmap use those samples.
 They estimate app use, not attention or intent. App lists are yours to define.
 
-During a session, the **Focus and progress check-in** asks for a 1–5 focus
-rating and whether the current task has no result yet, is partly done, or is
-finished. Record a concrete result when you mark a task finished. A reminder
-appears after about 20 minutes since the session began or the last check-in.
-The dashboard shows these self-reports beside the app samples and any file edit
-events from a watched project. After ending a session, the most recent session
-report remains visible. This provides stronger evidence of progress while
-keeping a clear distinction between what Observer saw and what you reported.
-Check-ins stay local and are not sent to MiniMax.
+Observer does not ask for recurring check-ins. During a session it automatically
+shows sampled app categories, recent app changes, and counts of file edits and
+Git state events from the watched project. After ending a session, the observed
+session summary remains visible. These signals help estimate whether observed
+activity aligns with the task, but cannot verify attention, completion, or
+work quality. Older check-in records, if present, stay in the local database;
+Observer no longer displays or sends them.
 
 Click **Mini companion** for a small movable window that stays above other
 windows. It shows the task, current app category, and a short feedback tip.
@@ -56,8 +54,9 @@ the existing database. Window titles are not sent to MiniMax.
 
 The feedback panel always offers rule-based tips. In **AI settings**, choose
 **MiniMax cloud**, select a model, paste your MiniMax API key, and click **Save
-AI settings**. Then **Ask MiniMax** sends your goal, task, and aggregate
-session category counts to MiniMax. It never sends window titles or file paths.
+AI settings**. Then **Ask MiniMax** sends your goal, task, aggregate session
+categories, recent app switching, and watched-project event counts to MiniMax.
+It never sends window titles, app names, or file paths.
 The key is encrypted with Windows DPAPI for the current user in
 `data/minimax-key.bin`; it is never returned to the browser. Use **Remove saved
 key** to delete it. Automatic feedback is enabled by default. While monitoring

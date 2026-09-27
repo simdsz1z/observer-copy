@@ -92,29 +92,17 @@ function renderJournal(journal) {
   }
 }
 
-function checkinPayload() {
-  return {
-    focus_rating: Number($('focus-rating').value),
-    progress: $('progress').value,
-    outcome: $('outcome').value.trim(),
-  };
-}
-
-function renderCheckins(behavior, lastReport) {
+function renderEvidence(behavior, lastReport) {
   const session = behavior.session;
-  const checkins = behavior.checkins;
-  for (const id of ['focus-rating', 'progress', 'outcome', 'save-checkin']) $(id).disabled = !session;
-  $('checkin-status').classList.toggle('due', Boolean(session && checkins.due));
-  $('checkin-status').textContent = session ? (checkins.due ? 'Check-in due now. Record what happened since the last one.' : `Next check-in around ${when(checkins.due_at)}.`) : 'Start a study session to record focus and progress.';
-  const report = $('checkin-report'); report.replaceChildren();
+  const report = $('evidence-report'); report.replaceChildren();
   const lines = [];
   if (session) {
-    lines.push(`${checkins.count} check-in${checkins.count === 1 ? '' : 's'} · ${checkins.average_focus === null ? 'no focus report yet' : `self-reported focus average ${checkins.average_focus}/5`} · ${checkins.completed_reports} finished result${checkins.completed_reports === 1 ? '' : 's'} reported`);
-    if (checkins.project_file_edits) lines.push(`${checkins.project_file_edits} file edit event${checkins.project_file_edits === 1 ? '' : 's'} observed in the watched project; edits do not prove the task was completed.`);
-    if (checkins.latest) lines.push(`Latest (${when(checkins.latest.timestamp)}): focus ${checkins.latest.focus_rating}/5, ${checkins.latest.progress}${checkins.latest.outcome ? ` · ${checkins.latest.outcome}` : ''}.`);
+    lines.push(`${behavior.minutes.focus} min in selected focus apps · ${behavior.minutes.distraction} min in selected distraction apps · ${behavior.switches_recent} recent app changes.`);
+    lines.push(`${behavior.project_events.file_edit} watched-project file edits · ${behavior.project_events.git_state} Git state events.`);
   } else if (lastReport) {
-    lines.push(`Last session (${when(lastReport.session.ended)}): ${lastReport.sampled_minutes} min sampled · ${lastReport.checkin_count} check-in${lastReport.checkin_count === 1 ? '' : 's'} · ${lastReport.average_focus === null ? 'no focus report' : `self-reported focus average ${lastReport.average_focus}/5`}.`);
-    if (lastReport.latest) lines.push(`Last reported result: ${lastReport.latest.progress}${lastReport.latest.outcome ? ` · ${lastReport.latest.outcome}` : ''}.`);
+    lines.push(`Last session (${when(lastReport.session.ended)}): ${lastReport.sampled_minutes} min sampled · ${lastReport.minutes.focus} min in selected focus apps · ${lastReport.minutes.distraction} min in selected distraction apps · ${lastReport.project_file_edits} watched-project file edits.`);
+  } else {
+    lines.push('Start a study session to see automatic evidence here.');
   }
   for (const line of lines) {
     const item = document.createElement('div'); item.textContent = line; report.append(item);
@@ -190,12 +178,12 @@ function render(data) {
   $('distraction-minutes').textContent = `${behavior.minutes.distraction} min`;
   $('unknown-minutes').textContent = `${(behavior.minutes.unknown + behavior.minutes.possible_focus).toFixed(1)} min`;
   $('away-minutes').textContent = `${behavior.minutes.away} min`;
-  renderCheckins(behavior, data.last_session_report);
+  renderEvidence(behavior, data.last_session_report);
   renderHeatmap(behavior);
   const modelFeedback = data.ai_feedback;
   if (modelFeedback) aiResult = null;
   renderFeedback(modelFeedback ? [modelFeedback.feedback, ...data.feedback] : aiResult ? [aiResult.feedback, ...data.feedback] : data.feedback);
-  $('feedback-meta').textContent = modelFeedback ? `${modelFeedback.automatic ? 'Automatic' : 'Requested'} ${modelFeedback.source === 'minimax' ? 'MiniMax' : 'local AI'} feedback · ${when(modelFeedback.timestamp)}. AI sees app counts; your check-ins stay local.` : aiResult?.note || 'App use and self-reported focus are different signals. Neither alone proves productivity.';
+  $('feedback-meta').textContent = modelFeedback ? `${modelFeedback.automatic ? 'Automatic' : 'Requested'} ${modelFeedback.source === 'minimax' ? 'MiniMax' : 'local AI'} feedback · ${when(modelFeedback.timestamp)}. Based on observed activity, not verified productivity.` : aiResult?.note || 'AI feedback uses observed activity and watched-project event counts. It cannot verify attention or work quality.';
   const events = $('events'); events.replaceChildren();
   if (!data.events.length) { events.className = 'events empty'; events.textContent = 'No activity recorded yet. Start monitoring and use your computer.'; }
   else {
@@ -234,9 +222,6 @@ async function action(path, body = {}) {
     if (path === '/api/ai/settings') editingAI = false;
     if (path === '/api/study' || path.startsWith('/api/session/') || path.startsWith('/api/ai/')) aiResult = null;
     if (path === '/api/ai/settings') $('minimax-key').value = '';
-    if (path === '/api/checkin' || path === '/api/session/end') {
-      $('focus-rating').value = ''; $('progress').value = ''; $('outcome').value = '';
-    }
     await refreshAfterAction();
   } catch (error) { showError(error.message); }
   finally { busy = false; $('toggle').disabled = false; }
@@ -262,17 +247,7 @@ $('save-study').addEventListener('click', () => action('/api/study', {
 }));
 $('session-toggle').addEventListener('click', () => {
   if (!$('session-toggle').textContent.startsWith('End')) return action('/api/session/start');
-  const hasDraft = $('focus-rating').value || $('progress').value || $('outcome').value.trim();
-  if (hasDraft && (!$('focus-rating').value || !$('progress').value)) {
-    showError('Finish or clear the check-in before ending this session.'); return;
-  }
-  action('/api/session/end', hasDraft ? checkinPayload() : {});
-});
-$('save-checkin').addEventListener('click', () => {
-  if (!$('focus-rating').value || !$('progress').value) {
-    showError('Choose a focus rating and progress before recording.'); return;
-  }
-  action('/api/checkin', checkinPayload());
+  action('/api/session/end');
 });
 $('open-companion').addEventListener('click', () => action('/api/companion/open'));
 $('ai-feedback').addEventListener('click', async () => {

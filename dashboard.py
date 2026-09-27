@@ -144,29 +144,10 @@ class DashboardState:
                 raise ValueError("Save a study goal first.")
             behavior.begin_session(DB, self.settings["goal"], self.settings["task"])
 
-    def record_checkin(self, data: dict) -> None:
-        rating = data.get("focus_rating")
-        progress = data.get("progress")
-        outcome = data.get("outcome", "")
-        if isinstance(rating, bool) or not isinstance(rating, int) or rating not in range(1, 6):
-            raise ValueError("Choose a focus rating from 1 to 5.")
-        if progress not in ("none", "partial", "complete") or not isinstance(outcome, str) or len(outcome) > 500:
-            raise ValueError("Choose progress and keep the result under 500 characters.")
-        outcome = outcome.strip()
-        if progress == "complete" and not outcome:
-            raise ValueError("Describe what was completed so the result is concrete.")
-        with self.lock:
-            session = behavior.active_session(DB)
-            if not session:
-                raise ValueError("Start a study session before recording a check-in.")
-            behavior.add_checkin(DB, session["id"], rating, progress, outcome)
-
-    def end_session(self, data: dict | None = None) -> None:
+    def end_session(self) -> None:
         with self.lock:
             session = behavior.active_session(DB)
             if session:
-                if data and data.get("focus_rating") is not None:
-                    self.record_checkin(data)
                 behavior.end_session(DB, session["id"])
 
     def _sample_loop(self) -> None:
@@ -311,12 +292,12 @@ class DashboardState:
         fallback = behavior.rule_feedback(summary, settings, active)
         if not summary["session"] or sum(summary["minutes"].values()) < 2:
             return {"source": "rules", "feedback": fallback, "note": "Study feedback needs an active session and a few minutes of samples."}
-        # Both providers receive only aggregate counts, goal, and task.
+        # Both providers receive aggregate evidence only; no titles, paths, or app names.
         provider = settings.get("ai_provider", "minimax")
         model = settings.get("minimax_model", "MiniMax-M3")
-        prompt = json.dumps({"goal": settings["goal"], "task": settings["task"], "session_minutes_by_category": summary["minutes"], "recent_app_switches": summary["switches_recent"], "sampling_interval_seconds": behavior.SAMPLE_SECONDS})
+        prompt = json.dumps({"goal": settings["goal"], "task": settings["task"], "session_minutes_by_category": summary["minutes"], "recent_app_switches": summary["switches_recent"], "current_category": summary["latest_category"], "recent_distraction_samples": summary["distraction_streak"], "watched_project_event_counts": summary["project_events"], "sampling_interval_seconds": behavior.SAMPLE_SECONDS})
         messages = [
-            {"role": "system", "content": "You are a precise activity analyst. State 1-2 concrete observations supported by the provided counts, then one practical next action tied to the goal. Separate observation from inference. Do not flatter, moralize, invent motives, infer mood, or claim that app use proves attention or productivity. If the data is weak, say so plainly."},
+            {"role": "system", "content": "You are an automatic, evidence-based activity analyst. Use the goal, task, sampled app categories, recent switching, and watched-project event counts to assess whether observed behavior appears aligned with the task. Give 1-2 specific observations, a cautious inference with uncertainty, and one practical next action. File edits show activity, not completion or quality. App categories show what was open, not thoughts or intent. Never ask the user to rate focus, answer a check-in, or report progress. Do not flatter, moralize, invent motives or mood, or assert verified productivity."},
             {"role": "user", "content": prompt},
         ]
         try:
@@ -540,9 +521,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/session/start":
                 self.server.state.start_session()
             elif path == "/api/session/end":
-                self.server.state.end_session(data)
-            elif path == "/api/checkin":
-                self.server.state.record_checkin(data)
+                self.server.state.end_session()
             elif path == "/api/companion/open":
                 self.server.state.open_companion(self.server.server_port)
             elif path == "/api/feedback":

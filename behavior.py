@@ -14,7 +14,6 @@ from observer_ai.collectors import _current_window_title
 
 
 SAMPLE_SECONDS = 30
-CHECKIN_SECONDS = 20 * 60
 
 
 def ensure_schema(db: str | Path) -> None:
@@ -118,15 +117,6 @@ def end_session(db: str | Path, session_id: int) -> None:
         conn.commit()
 
 
-def add_checkin(db: str | Path, session_id: int, focus_rating: int, progress: str, outcome: str) -> None:
-    with closing(sqlite3.connect(db, timeout=5)) as conn:
-        conn.execute(
-            "INSERT INTO study_checkins(timestamp, session_id, focus_rating, progress, outcome) VALUES (?,?,?,?,?)",
-            (time.time(), session_id, focus_rating, progress, outcome),
-        )
-        conn.commit()
-
-
 def active_session(db: str | Path) -> dict | None:
     with closing(sqlite3.connect(db, timeout=5)) as conn:
         conn.row_factory = sqlite3.Row
@@ -142,20 +132,21 @@ def last_session_report(db: str | Path) -> dict | None:
         ).fetchone()
         if not session:
             return None
-        checkins = conn.execute(
-            "SELECT timestamp, focus_rating, progress, outcome FROM study_checkins "
-            "WHERE session_id = ? ORDER BY timestamp DESC", (session["id"],)
+        samples = conn.execute(
+            "SELECT category, COUNT(*) FROM behavior_samples WHERE session_id = ? GROUP BY category", (session["id"],)
         ).fetchall()
-        sample_count = conn.execute(
-            "SELECT COUNT(*) FROM behavior_samples WHERE session_id = ?", (session["id"],)
+        edits = conn.execute(
+            "SELECT COUNT(*) FROM events WHERE event_type = 'file_edit' AND timestamp BETWEEN ? AND ?",
+            (session["started"], session["ended"]),
         ).fetchone()[0]
+    minutes = {key: 0 for key in ("focus", "possible_focus", "distraction", "away", "unknown")}
+    for category, count in samples:
+        minutes[category] = round(count * SAMPLE_SECONDS / 60, 1)
     return {
         "session": dict(session),
-        "sampled_minutes": round(sample_count * SAMPLE_SECONDS / 60, 1),
-        "checkin_count": len(checkins),
-        "average_focus": round(sum(row["focus_rating"] for row in checkins) / len(checkins), 1) if checkins else None,
-        "latest": dict(checkins[0]) if checkins else None,
-        "completed_reports": sum(row["progress"] == "complete" for row in checkins),
+        "sampled_minutes": round(sum(minutes.values()), 1),
+        "minutes": minutes,
+        "project_file_edits": edits,
     }
 
 
@@ -168,15 +159,11 @@ def summary(db: str | Path, current_session: dict | None) -> dict:
             "SELECT timestamp, application, category, session_id FROM behavior_samples "
             "WHERE timestamp >= ? ORDER BY timestamp DESC", (since,)
         ).fetchall()
-        checkins = conn.execute(
-            "SELECT timestamp, focus_rating, progress, outcome FROM study_checkins "
-            "WHERE session_id = ? ORDER BY timestamp DESC",
-            (current_session["id"] if current_session else -1,),
+        event_counts = conn.execute(
+            "SELECT event_type, COUNT(*) FROM events WHERE timestamp BETWEEN ? AND ? "
+            "AND event_type IN ('file_edit', 'git_state') GROUP BY event_type",
+            (current_session["started"] if current_session else now, now),
         ).fetchall()
-        file_edits = conn.execute(
-            "SELECT COUNT(*) FROM events WHERE event_type = 'file_edit' AND timestamp >= ?",
-            (current_session["started"] if current_session else now,),
-        ).fetchone()[0] if current_session else 0
     today = dt.datetime.fromtimestamp(now).date()
     grid = [[{"focus": 0, "distraction": 0, "away": 0, "unknown": 0} for _ in range(24)] for _ in range(7)]
     for row in rows:
@@ -198,9 +185,8 @@ def summary(db: str | Path, current_session: dict | None) -> dict:
         if row["category"] != "distraction":
             break
         distraction_streak += 1
-    latest_checkin = dict(checkins[0]) if checkins else None
-    focus_average = round(sum(row["focus_rating"] for row in checkins) / len(checkins), 1) if checkins else None
-    checkin_due_at = (latest_checkin["timestamp"] if latest_checkin else current_session["started"]) + CHECKIN_SECONDS if current_session else None
+    events = {key: 0 for key in ("file_edit", "git_state")}
+    events.update(event_counts)
     return {
         "session": current_session,
         "minutes": minutes,
@@ -211,15 +197,7 @@ def summary(db: str | Path, current_session: dict | None) -> dict:
         "heatmap": grid,
         "day_labels": [(today - dt.timedelta(days=6 - i)).strftime("%a %d") for i in range(7)],
         "sample_seconds": SAMPLE_SECONDS,
-        "checkins": {
-            "count": len(checkins),
-            "average_focus": focus_average,
-            "latest": latest_checkin,
-            "completed_reports": sum(row["progress"] == "complete" for row in checkins),
-            "due_at": checkin_due_at,
-            "due": bool(checkin_due_at and now >= checkin_due_at),
-            "project_file_edits": file_edits,
-        },
+        "project_events": events,
     }
 
 
@@ -237,9 +215,6 @@ def rule_feedback(behavior: dict, settings: dict, monitoring: bool) -> list[str]
     if total < 2:
         return ["Your session has just started. Give it a few minutes before reading the pattern."]
     feedback = []
-    latest_checkin = behavior["checkins"]["latest"]
-    if latest_checkin and latest_checkin["focus_rating"] <= 2:
-        feedback.append(f"Your latest focus check-in was {latest_checkin['focus_rating']}/5. Decide whether to change the next step or take a break.")
     if behavior.get("distraction_streak", 0) >= 3:
         feedback.append("The last three or more samples were in an app you marked as distracting. Check whether this serves your current task.")
     if minutes["distraction"] >= 2 and minutes["distraction"] >= minutes["focus"]:
