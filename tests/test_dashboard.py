@@ -87,6 +87,7 @@ class DashboardTests(unittest.TestCase):
                 [(time.time(), "Word.exe", "focus", session["id"])] * 4,
             )
             conn.commit()
+        self.state.record_checkin({"focus_rating": 4, "progress": "partial", "outcome": "Private result"})
         sent = []
 
         def fake_open(request, timeout):
@@ -103,6 +104,8 @@ class DashboardTests(unittest.TestCase):
         prompt = sent[0]["messages"][1]["content"]
         self.assertIn("session_minutes_by_category", prompt)
         self.assertNotIn("Word.exe", prompt)
+        self.assertNotIn("focus_rating", prompt)
+        self.assertNotIn("Private result", prompt)
 
     def test_minimax_key_is_encrypted_redacted_and_used_for_feedback(self):
         dummy_key = "dummy-minimax-key"
@@ -186,6 +189,34 @@ class DashboardTests(unittest.TestCase):
         self.assertFalse(overview["status"]["study"]["goal"])
         self.assertEqual(overview["journal"]["subjects"][0]["subject"], "Project outline")
         self.assertIn("journal", overview["feedback"][0].lower())
+
+    def test_checkins_record_focus_and_concrete_progress_locally(self):
+        self.request("/api/study", {"goal": "Finish a report", "task": "Draft introduction", "focus_apps": [], "distraction_apps": []})
+        self.request("/api/session/start", {})
+        session = behavior.active_session(dashboard.DB)
+        with self.assertRaises(urllib.error.HTTPError):
+            self.request("/api/checkin", {"focus_rating": 4, "progress": "complete", "outcome": ""})
+        self.assertEqual(behavior.summary(dashboard.DB, session)["checkins"]["count"], 0)
+        self.request("/api/checkin", {"focus_rating": 4, "progress": "partial", "outcome": "Drafted an outline"})
+        active = self.request("/api/overview")[1]["behavior"]["checkins"]
+        self.assertEqual(active["average_focus"], 4)
+        self.assertEqual(active["latest"]["outcome"], "Drafted an outline")
+        self.assertFalse(active["due"])
+        self.request("/api/session/end", {"focus_rating": 5, "progress": "complete", "outcome": "Wrote two pages"})
+        overview = self.request("/api/overview")[1]
+        self.assertIsNone(overview["behavior"]["session"])
+        self.assertEqual(overview["last_session_report"]["checkin_count"], 2)
+        self.assertEqual(overview["last_session_report"]["completed_reports"], 1)
+        self.assertEqual(overview["last_session_report"]["latest"]["outcome"], "Wrote two pages")
+
+    def test_checkin_becomes_due_after_twenty_minutes(self):
+        self.state.set_study({"goal": "Finish a report", "task": "Draft introduction", "focus_apps": [], "distraction_apps": []})
+        self.state.start_session()
+        session = behavior.active_session(dashboard.DB)
+        with closing(sqlite3.connect(dashboard.DB)) as conn:
+            conn.execute("UPDATE study_sessions SET started = ? WHERE id = ?", (time.time() - behavior.CHECKIN_SECONDS - 1, session["id"]))
+            conn.commit()
+        self.assertTrue(behavior.summary(dashboard.DB, behavior.active_session(dashboard.DB))["checkins"]["due"])
 
 
 if __name__ == "__main__":

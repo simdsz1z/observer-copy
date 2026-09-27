@@ -30,6 +30,16 @@ app every 30 seconds and marks the sample as focus, distraction, away, or
 unclassified. The session totals and seven-day heatmap use those samples.
 They estimate app use, not attention or intent. App lists are yours to define.
 
+During a session, the **Focus and progress check-in** asks for a 1–5 focus
+rating and whether the current task has no result yet, is partly done, or is
+finished. Record a concrete result when you mark a task finished. A reminder
+appears after about 20 minutes since the session began or the last check-in.
+The dashboard shows these self-reports beside the app samples and any file edit
+events from a watched project. After ending a session, the most recent session
+report remains visible. This provides stronger evidence of progress while
+keeping a clear distinction between what Observer saw and what you reported.
+Check-ins stay local and are not sent to MiniMax.
+
 Click **Mini companion** for a small movable window that stays above other
 windows. It shows the task, current app category, and a short feedback tip.
 Close it with the X; the dashboard and monitoring continue independently.

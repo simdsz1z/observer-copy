@@ -144,10 +144,29 @@ class DashboardState:
                 raise ValueError("Save a study goal first.")
             behavior.begin_session(DB, self.settings["goal"], self.settings["task"])
 
-    def end_session(self) -> None:
+    def record_checkin(self, data: dict) -> None:
+        rating = data.get("focus_rating")
+        progress = data.get("progress")
+        outcome = data.get("outcome", "")
+        if isinstance(rating, bool) or not isinstance(rating, int) or rating not in range(1, 6):
+            raise ValueError("Choose a focus rating from 1 to 5.")
+        if progress not in ("none", "partial", "complete") or not isinstance(outcome, str) or len(outcome) > 500:
+            raise ValueError("Choose progress and keep the result under 500 characters.")
+        outcome = outcome.strip()
+        if progress == "complete" and not outcome:
+            raise ValueError("Describe what was completed so the result is concrete.")
+        with self.lock:
+            session = behavior.active_session(DB)
+            if not session:
+                raise ValueError("Start a study session before recording a check-in.")
+            behavior.add_checkin(DB, session["id"], rating, progress, outcome)
+
+    def end_session(self, data: dict | None = None) -> None:
         with self.lock:
             session = behavior.active_session(DB)
             if session:
+                if data and data.get("focus_rating") is not None:
+                    self.record_checkin(data)
                 behavior.end_session(DB, session["id"])
 
     def _sample_loop(self) -> None:
@@ -434,6 +453,7 @@ class DashboardState:
             "projects": [dict(row) for row in project_rows],
             "hours": [{"timestamp": (current_hour - i) * 3600, "count": hours.get(current_hour - i, 0)} for i in range(23, -1, -1)],
             "behavior": behavior_summary,
+            "last_session_report": behavior.last_session_report(DB),
             "journal": activity_journal,
             "feedback": behavior.rule_feedback(behavior_summary, status["study"], status["monitoring"]),
             "ai_feedback": latest_ai,
@@ -520,7 +540,9 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/session/start":
                 self.server.state.start_session()
             elif path == "/api/session/end":
-                self.server.state.end_session()
+                self.server.state.end_session(data)
+            elif path == "/api/checkin":
+                self.server.state.record_checkin(data)
             elif path == "/api/companion/open":
                 self.server.state.open_companion(self.server.server_port)
             elif path == "/api/feedback":

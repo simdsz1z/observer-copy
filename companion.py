@@ -80,7 +80,8 @@ def run(port: int) -> None:
             behavior = data["behavior"]
             current = data["current"] or {}
             session = behavior["session"]
-            status.configure(text=("● Monitoring" if monitoring else "● Paused") + ("  ·  Study session" if session else ""), fg="#83e0b6" if monitoring else "#a2acc0")
+            due = bool(session and behavior.get("checkins", {}).get("due"))
+            status.configure(text=("● Monitoring" if monitoring else "● Paused") + ("  ·  Check-in due" if due else "  ·  Study session" if session else ""), fg="#f2be8f" if due else "#83e0b6" if monitoring else "#a2acc0")
             task.configure(text=study.get("task") or study.get("goal") or "Observation mode")
             category = behavior["latest_category"].replace("_", " ")
             state.configure(text=f"Now: {current.get('current_application') or '—'}  ·  {category}")
