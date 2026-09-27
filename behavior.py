@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.wintypes
 import datetime as dt
+import re
 import sqlite3
 import time
 from contextlib import closing
@@ -49,6 +50,9 @@ def ensure_schema(db: str | Path) -> None:
             CREATE INDEX IF NOT EXISTS idx_study_checkins_session ON study_checkins(session_id, timestamp);
             """
         )
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(behavior_samples)")}
+        if "window_title" not in columns:
+            conn.execute("ALTER TABLE behavior_samples ADD COLUMN window_title TEXT")
         conn.commit()
 
 
@@ -88,14 +92,28 @@ def classify(app: str | None, title: str | None, settings: dict, idle: float | N
     return "unknown"
 
 
+def safe_page_title(app: str | None, title: str | None) -> str | None:
+    """Keep useful page context without sending common private identifiers to AI."""
+    if not title or not app or app.lower() not in {"msedge.exe", "chrome.exe", "firefox.exe", "brave.exe", "opera.exe"}:
+        return None
+    if re.search(r"password|secret|api[-_ ]?key|inbox|mail|bank|account|sign[ -]?in|private|incognito|token", title, re.I):
+        return None
+    title = re.sub(r"\s+and\s+\d+\s+more pages\b", "", title, flags=re.I)
+    title = re.sub(r"\s+-\s+(?:Personal|InPrivate|Guest)\s+-\s+(?:Microsoft\s+Edge|Google\s+Chrome)$", "", title, flags=re.I)
+    title = re.sub(r"\s+-\s+(?:Microsoft\s+Edge|Google\s+Chrome|Mozilla\s+Firefox)$", "", title, flags=re.I)
+    title = re.sub(r"https?://\S+|\bwww\.\S+|\b\S+@\S+\.\S+\b|(?:[A-Za-z]:\\|/Users/|/home/)\S+", "[redacted]", title)
+    title = " ".join(title.split())[:120].strip(" -·")
+    return title if len(title) >= 3 and title.lower() not in {"new tab", "settings", "search"} else None
+
+
 def sample(db: str | Path, settings: dict, session_id: int | None) -> dict:
     app, title = _current_window_title()
     idle = idle_seconds()
     category = classify(app, title, settings, idle)
     with closing(sqlite3.connect(db, timeout=5)) as conn:
         conn.execute(
-            "INSERT INTO behavior_samples(timestamp, application, category, session_id) VALUES (?,?,?,?)",
-            (time.time(), app, category, session_id),
+            "INSERT INTO behavior_samples(timestamp, application, category, session_id, window_title) VALUES (?,?,?,?,?)",
+            (time.time(), app, category, session_id, safe_page_title(app, title)),
         )
         conn.commit()
     return {"application": app or "", "category": category, "idle_seconds": idle}

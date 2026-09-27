@@ -32,11 +32,14 @@ They estimate app use, not attention or intent. App lists are yours to define.
 
 Observer does not ask for recurring check-ins. During a session it automatically
 shows sampled app categories, recent app changes, and counts of file edits and
-Git state events from the watched project. After ending a session, the observed
-session summary remains visible. These signals help estimate whether observed
-activity aligns with the task, but cannot verify attention, completion, or
-work quality. Older check-in records, if present, stay in the local database;
-Observer no longer displays or sends them.
+Git state events from the watched project. MiniMax also gets a compact timeline
+of recent sampled apps and cleaned browser page titles. It can distinguish a
+task-related tutorial from an unrelated video using the title and the goal,
+rather than treating all browser time alike. Generic or missing titles still
+have insufficient context; Observer does not invent an activity. After ending
+a session, the observed session summary remains visible. These signals cannot
+verify attention, completion, or work quality. Older check-in records, if
+present, stay in the local database; Observer no longer displays or sends them.
 
 Click **Mini companion** for a small movable window that stays above other
 windows. It shows the task, current app category, and a short feedback tip.
@@ -50,13 +53,17 @@ sampled app each day, and browser page titles that appeared in at least two focu
 events. The mini companion shows the most concrete current observation in this
 mode. Repeated titles are clues about what was opened repeatedly; they do not
 prove interest, intent, or productivity. The journal is computed locally from
-the existing database. Window titles are not sent to MiniMax.
+the existing database. During a study session, cleaned browser page titles
+may also be included in MiniMax feedback requests as described below.
 
 The feedback panel always offers rule-based tips. In **AI settings**, choose
 **MiniMax cloud**, select a model, paste your MiniMax API key, and click **Save
 AI settings**. Then **Ask MiniMax** sends your goal, task, aggregate session
-categories, recent app switching, and watched-project event counts to MiniMax.
-It never sends window titles, app names, or file paths.
+categories, recent app switching, watched-project event counts, and a short
+list of sampled app types and cleaned browser page titles to MiniMax. It strips
+email addresses, URLs, file paths, and sensitive titles before sending them.
+Other application titles and raw file paths stay local. Do not put confidential
+information in the goal or task if you use MiniMax cloud.
 The key is encrypted with Windows DPAPI for the current user in
 `data/minimax-key.bin`; it is never returned to the browser. Use **Remove saved
 key** to delete it. Automatic feedback is enabled by default. While monitoring

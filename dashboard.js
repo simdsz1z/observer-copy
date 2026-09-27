@@ -92,13 +92,26 @@ function renderJournal(journal) {
   }
 }
 
-function renderEvidence(behavior, lastReport) {
+function renderEvidence(behavior, lastReport, modelFeedback) {
   const session = behavior.session;
   const report = $('evidence-report'); report.replaceChildren();
   const lines = [];
   if (session) {
     lines.push(`${behavior.minutes.focus} min in selected focus apps · ${behavior.minutes.distraction} min in selected distraction apps · ${behavior.switches_recent} recent app changes.`);
     lines.push(`${behavior.project_events.file_edit} watched-project file edits · ${behavior.project_events.git_state} Git state events.`);
+    if (modelFeedback?.analysis) {
+      const labels = { work_related: 'Related to goal', off_task: 'Appears off task', insufficient_context: 'Context unavailable' };
+      const minutes = { work_related: 0, off_task: 0, insufficient_context: 0 };
+      for (const decision of modelFeedback.analysis.classifications) {
+        const context = modelFeedback.contexts?.find((item) => item.id === decision.id);
+        if (context) minutes[decision.label] += context.minutes;
+      }
+      lines.push(`AI assessment of recent sampled context: ${minutes.work_related.toFixed(1)} min related · ${minutes.off_task.toFixed(1)} min appears off task · ${minutes.insufficient_context.toFixed(1)} min without enough detail. These are estimates from the last analysis, not a whole-session score.`);
+      for (const decision of modelFeedback.analysis.classifications.slice(0, 8)) {
+        const context = modelFeedback.contexts?.find((item) => item.id === decision.id);
+        if (context) lines.push(`${labels[decision.label]} · ${context.app}${context.page_title ? ` · ${context.page_title}` : ''} · ${context.minutes} min. ${decision.reason}`);
+      }
+    }
   } else if (lastReport) {
     lines.push(`Last session (${when(lastReport.session.ended)}): ${lastReport.sampled_minutes} min sampled · ${lastReport.minutes.focus} min in selected focus apps · ${lastReport.minutes.distraction} min in selected distraction apps · ${lastReport.project_file_edits} watched-project file edits.`);
   } else {
@@ -178,12 +191,12 @@ function render(data) {
   $('distraction-minutes').textContent = `${behavior.minutes.distraction} min`;
   $('unknown-minutes').textContent = `${(behavior.minutes.unknown + behavior.minutes.possible_focus).toFixed(1)} min`;
   $('away-minutes').textContent = `${behavior.minutes.away} min`;
-  renderEvidence(behavior, data.last_session_report);
+  renderEvidence(behavior, data.last_session_report, data.ai_feedback);
   renderHeatmap(behavior);
   const modelFeedback = data.ai_feedback;
   if (modelFeedback) aiResult = null;
-  renderFeedback(modelFeedback ? [modelFeedback.feedback, ...data.feedback] : aiResult ? [aiResult.feedback, ...data.feedback] : data.feedback);
-  $('feedback-meta').textContent = modelFeedback ? `${modelFeedback.automatic ? 'Automatic' : 'Requested'} ${modelFeedback.source === 'minimax' ? 'MiniMax' : 'local AI'} feedback · ${when(modelFeedback.timestamp)}. Based on observed activity, not verified productivity.` : aiResult?.note || 'AI feedback uses observed activity and watched-project event counts. It cannot verify attention or work quality.';
+  renderFeedback(modelFeedback ? [modelFeedback.feedback] : aiResult ? [aiResult.feedback] : data.feedback);
+  $('feedback-meta').textContent = modelFeedback ? `${modelFeedback.automatic ? 'Automatic' : 'Requested'} ${modelFeedback.source === 'minimax' ? 'MiniMax' : 'local AI'} feedback · ${when(modelFeedback.timestamp)}${modelFeedback.analysis ? ` · ${modelFeedback.analysis.confidence} confidence` : ''}. Observed activity cannot prove attention.` : aiResult?.note || 'AI feedback uses observed activity and page context. It cannot verify attention or work quality.';
   const events = $('events'); events.replaceChildren();
   if (!data.events.length) { events.className = 'events empty'; events.textContent = 'No activity recorded yet. Start monitoring and use your computer.'; }
   else {

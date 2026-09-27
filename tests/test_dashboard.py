@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 import behavior
+import activity_context
 import dashboard
 import journal
 
@@ -23,6 +24,12 @@ class BehaviorTests(unittest.TestCase):
         self.assertEqual(behavior.classify("Game.exe", "Review chapter", settings, 0), "distraction")
         self.assertEqual(behavior.classify("Browser.exe", "Something else", settings, 0), "unknown")
         self.assertEqual(behavior.classify("Word.exe", "Notes", settings, 100), "away")
+
+    def test_browser_title_filter_removes_private_context(self):
+        self.assertEqual(behavior.safe_page_title("msedge.exe", "How pull requests work - YouTube"), "How pull requests work - YouTube")
+        self.assertIsNone(behavior.safe_page_title("chrome.exe", "Inbox - personal@example.com - Gmail"))
+        self.assertIsNone(behavior.safe_page_title("chrome.exe", "My API key - Chrome"))
+        self.assertIsNone(behavior.safe_page_title("code.exe", "Private project"))
 
 
 class DashboardTests(unittest.TestCase):
@@ -138,9 +145,56 @@ class DashboardTests(unittest.TestCase):
         with mock.patch.object(dashboard.urllib.request, "urlopen", side_effect=fake_open):
             feedback = self.state.ai_feedback()
         self.assertEqual(feedback["source"], "minimax")
-        self.assertEqual(feedback["feedback"], "Try a short study block.")
+        self.assertEqual(feedback["feedback"], "AI feedback could not be read reliably. Observer will retry when there is new activity.")
         cleared = self.request("/api/ai/key/clear", {})[1]
         self.assertFalse(cleared["has_minimax_key"])
+
+    def test_ai_uses_video_subject_and_classifies_each_context(self):
+        self.state.set_ai_settings({"provider": "minimax", "model": "MiniMax-M3", "api_key": "dummy-key"})
+        self.state.set_study({"goal": "Develop a program", "task": "Learn pull requests", "focus_apps": [], "distraction_apps": []})
+        self.state.start_session()
+        session = behavior.active_session(dashboard.DB)
+        with closing(sqlite3.connect(dashboard.DB)) as conn:
+            conn.executemany(
+                "INSERT INTO behavior_samples(timestamp, application, category, session_id, window_title) VALUES (?,?,?,?,?)",
+                [(time.time(), "msedge.exe", "unknown", session["id"], title) for title in
+                 ["How pull requests work - YouTube"] * 2 + ["Funny cat compilation - YouTube"] * 2],
+            )
+            conn.commit()
+        contexts = activity_context.build(dashboard.DB, session)["contexts"]
+        self.assertEqual(len(contexts), 2)
+        self.assertEqual(contexts[0]["page_title"], "How pull requests work - YouTube")
+        def fake_open(request, timeout):
+            prompt = json.loads(json.loads(request.data)["messages"][1]["content"])
+            self.assertIn("How pull requests work - YouTube", str(prompt["recent_contexts"]))
+            self.assertIn("Funny cat compilation - YouTube", str(prompt["recent_contexts"]))
+            body = {"alignment": "mixed", "confidence": "medium", "observation": "The pull request tutorial relates to your task; the cat video does not.", "next_step": "Return to the pull request tutorial.", "classifications": [{"id": 1, "label": "work_related", "reason": "Pull request tutorial matches the task."}, {"id": 2, "label": "off_task", "reason": "Cat video is unrelated."}]}
+            return io.BytesIO(json.dumps({"choices": [{"message": {"content": json.dumps(body)}}]}).encode())
+        with mock.patch.object(dashboard.urllib.request, "urlopen", side_effect=fake_open):
+            result = self.state.ai_feedback()
+        self.assertEqual(result["analysis"]["alignment"], "mixed")
+        self.assertEqual([item["label"] for item in result["analysis"]["classifications"]], ["work_related", "off_task"])
+
+    def test_generic_browser_activity_cannot_be_declared_off_task(self):
+        contexts = [{"id": 1, "app": "Browser", "page_title": None, "minutes": 18}]
+        claim = {"alignment": "off_task", "confidence": "high", "observation": "You were distracted.", "next_step": "Work harder.", "classifications": [{"id": 1, "label": "off_task", "reason": "Browser."}]}
+        result = dashboard.parse_analysis(json.dumps(claim), contexts)
+        self.assertEqual(result["alignment"], "insufficient_evidence")
+        self.assertEqual(result["confidence"], "low")
+        self.assertEqual(result["classifications"][0]["label"], "insufficient_context")
+
+    def test_older_samples_use_matching_foreground_page_title(self):
+        self.state.set_study({"goal": "Build an app", "task": "Learn pull requests", "focus_apps": [], "distraction_apps": []})
+        self.state.start_session()
+        session = behavior.active_session(dashboard.DB)
+        now = time.time()
+        with closing(sqlite3.connect(dashboard.DB)) as conn:
+            conn.execute("UPDATE study_sessions SET started = ? WHERE id = ?", (now - 10, session["id"]))
+            conn.execute("INSERT INTO events(timestamp, source, event_type, application, window_title) VALUES (?,'foreground','app_focus','msedge.exe',?)", (now - 3, "How pull requests work - YouTube"))
+            conn.execute("INSERT INTO behavior_samples(timestamp, application, category, session_id) VALUES (?,?,?,?)", (now - 2, "msedge.exe", "unknown", session["id"]))
+            conn.commit()
+        contexts = activity_context.build(dashboard.DB, behavior.active_session(dashboard.DB), now)["contexts"]
+        self.assertEqual(contexts[0]["page_title"], "How pull requests work - YouTube")
 
     def test_automatic_feedback_waits_for_fresh_samples_and_respects_limits(self):
         self.state.set_ai_settings({"provider": "minimax", "model": "MiniMax-M3", "api_key": "dummy-key", "auto_feedback": True})
@@ -160,7 +214,7 @@ class DashboardTests(unittest.TestCase):
             self.assertTrue(result["automatic"])
             self.state.ai_feedback(automatic=True)
             self.assertEqual(call.call_count, 1)
-        self.assertEqual(self.state.ai_history["latest"]["feedback"], "Review one page now.")
+        self.assertEqual(self.state.ai_history["latest"]["feedback"], "AI feedback could not be read reliably. Observer will retry when there is new activity.")
         self.assertEqual(self.state.ai_history["calls_today"], 1)
         self.assertEqual(self.state._auto_feedback_status()["state"], "collecting")
         with closing(sqlite3.connect(dashboard.DB)) as conn:

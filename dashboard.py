@@ -21,6 +21,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import behavior
+import activity_context
 import journal
 import secret_store
 from observer_ai.collectors import (
@@ -46,6 +47,65 @@ AUTO_COOLDOWN = 15 * 60
 AUTO_FAILURE_COOLDOWN = 30 * 60
 AUTO_DAILY_LIMIT = 12
 AUTO_SAMPLE_COUNT = 10
+
+
+def parse_analysis(message: str, contexts: list[dict]) -> dict | None:
+    """Accept a compact model report only when its labels refer to supplied context IDs."""
+    cleaned = re.sub(r"^\s*<think>.*?</think>\s*", "", message.strip(), flags=re.DOTALL)
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.I)
+    try:
+        data = json.loads(cleaned)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    allowed_alignment = {"on_task", "off_task", "mixed", "insufficient_evidence"}
+    alignment = data.get("alignment")
+    confidence = data.get("confidence")
+    if alignment not in allowed_alignment or confidence not in {"low", "medium", "high"}:
+        return None
+    observation = data.get("observation")
+    suggestion = data.get("next_step")
+    if not isinstance(observation, str) or not isinstance(suggestion, str):
+        return None
+    if not observation.strip() or len(observation) > 280 or len(suggestion) > 220:
+        return None
+    valid_ids = {item["id"] for item in contexts}
+    labels = []
+    raw_labels = data.get("classifications", [])
+    for item in raw_labels if isinstance(raw_labels, list) else []:
+        if not isinstance(item, dict) or item.get("id") not in valid_ids or item.get("label") not in {"work_related", "off_task", "insufficient_context"}:
+            continue
+        reason = item.get("reason", "")
+        if not isinstance(reason, str):
+            continue
+        labels.append({"id": item["id"], "label": item["label"], "reason": reason.strip()[:140]})
+    labels = list({item["id"]: item for item in labels}.values())
+    labelled_ids = {item["id"] for item in labels}
+    for item in contexts:
+        if item["id"] not in labelled_ids:
+            labels.append({"id": item["id"], "label": "insufficient_context", "reason": "The AI did not classify this context."})
+    # Generic browser/app labels cannot establish a negative finding.
+    generic_titles = {"youtube", "google", "bing", "home", "new tab"}
+    context_by_id = {item["id"]: item for item in contexts}
+    for item in labels:
+        context = context_by_id[item["id"]]
+        generic_browser = context["app"] == "Browser" and (not context["page_title"] or context["page_title"].lower() in generic_titles)
+        if generic_browser and item["label"] != "insufficient_context":
+            item.update({"label": "insufficient_context", "reason": "The page title does not identify the activity."})
+        elif not context["page_title"] and item["label"] == "off_task" and context["app"] not in {"Steam"}:
+            item.update({"label": "insufficient_context", "reason": "The app alone does not show what happened."})
+    informative = any(
+        (item["page_title"] and item["page_title"].lower() not in generic_titles)
+        or item["app"] not in {"Browser", "Other app", "App unavailable"}
+        for item in contexts
+    )
+    if not informative or (alignment == "off_task" and not any(item["label"] == "off_task" for item in labels)):
+        alignment, confidence = "insufficient_evidence", "low"
+        observation = "Observer saw app activity but did not capture enough page or app context to judge its connection to the goal."
+        suggestion = "Continue working; Observer will use new page titles as they appear."
+        labels = [{"id": item["id"], "label": "insufficient_context", "reason": "No specific page or app context captured."} for item in contexts]
+    return {"alignment": alignment, "confidence": confidence, "observation": observation.strip(), "next_step": suggestion.strip(), "classifications": labels}
 
 
 class DashboardState:
@@ -292,12 +352,13 @@ class DashboardState:
         fallback = behavior.rule_feedback(summary, settings, active)
         if not summary["session"] or sum(summary["minutes"].values()) < 2:
             return {"source": "rules", "feedback": fallback, "note": "Study feedback needs an active session and a few minutes of samples."}
-        # Both providers receive aggregate evidence only; no titles, paths, or app names.
+        # Both providers receive a short context timeline with filtered browser titles.
         provider = settings.get("ai_provider", "minimax")
         model = settings.get("minimax_model", "MiniMax-M3")
-        prompt = json.dumps({"goal": settings["goal"], "task": settings["task"], "session_minutes_by_category": summary["minutes"], "recent_app_switches": summary["switches_recent"], "current_category": summary["latest_category"], "recent_distraction_samples": summary["distraction_streak"], "watched_project_event_counts": summary["project_events"], "sampling_interval_seconds": behavior.SAMPLE_SECONDS})
+        context = activity_context.build(DB, session)
+        prompt = json.dumps({"goal": settings["goal"], "task": settings["task"], "session_minutes_by_category": summary["minutes"], "recent_app_switches": summary["switches_recent"], "watched_project_event_counts": summary["project_events"], "recent_context_window_minutes": context["window_minutes"], "recent_contexts": context["contexts"], "sampling_interval_seconds": behavior.SAMPLE_SECONDS}, ensure_ascii=False)
         messages = [
-            {"role": "system", "content": "You are an automatic, evidence-based activity analyst. Use the goal, task, sampled app categories, recent switching, and watched-project event counts to assess whether observed behavior appears aligned with the task. Give 1-2 specific observations, a cautious inference with uncertainty, and one practical next action. File edits show activity, not completion or quality. App categories show what was open, not thoughts or intent. Never ask the user to rate focus, answer a check-in, or report progress. Do not flatter, moralize, invent motives or mood, or assert verified productivity."},
+            {"role": "system", "content": "You assess whether observed computer activity relates to the user's goal. Treat the page title and task together: a relevant YouTube tutorial can be work, an unrelated video can be off task, and ChatGPT can be work related when used for the goal. A browser or app alone does not establish either. Classify every context ID as work_related, off_task, or insufficient_context. Never turn an unclassified app category or zero file edits into evidence of distraction; planning, research and browser work may have no edits. Do not say a mature session just started. If titles are unavailable or generic, report insufficient_evidence. Never assert actual attention, intent, completion, mood, or productivity. No moralizing or questions. Return only compact JSON: {\"alignment\":\"on_task|off_task|mixed|insufficient_evidence\",\"confidence\":\"low|medium|high\",\"observation\":\"one brief factual sentence\",\"next_step\":\"one practical sentence or empty string\",\"classifications\":[{\"id\":1,\"label\":\"work_related|off_task|insufficient_context\",\"reason\":\"brief evidence\"}]}"},
             {"role": "user", "content": prompt},
         ]
         try:
@@ -305,7 +366,7 @@ class DashboardState:
                 key = secret_store.load(MINIMAX_KEY)
                 if not key:
                     return {"source": "rules", "feedback": fallback, "note": "Add a MiniMax API key in AI settings to get model feedback."}
-                payload = {"model": model, "temperature": 0.4, "max_completion_tokens": 1024, "reasoning_split": True, "messages": messages}
+                payload = {"model": model, "temperature": 0.2, "max_completion_tokens": 1024, "reasoning_split": True, "messages": messages}
                 endpoint = "https://api.minimax.io/v1/chat/completions"
                 headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
                 timeout = 45
@@ -315,7 +376,7 @@ class DashboardState:
                 if not models:
                     raise ValueError("No local model is loaded.")
                 model = models[0]["id"]
-                payload = {"model": model, "temperature": 0.4, "max_tokens": 180, "messages": messages}
+                payload = {"model": model, "temperature": 0.2, "max_tokens": 700, "messages": messages}
                 endpoint = "http://127.0.0.1:1234/v1/chat/completions"
                 headers = {"Content-Type": "application/json"}
                 timeout = 20
@@ -337,7 +398,12 @@ class DashboardState:
             message = re.sub(r"^\s*<think>.*?</think>\s*", "", message, flags=re.DOTALL)
             if not message:
                 raise ValueError("The model returned no feedback.")
-            result = {"source": "minimax" if provider == "minimax" else "local_ai", "model": model, "feedback": message, "timestamp": time.time(), "session_id": session["id"], "automatic": automatic}
+            analysis = parse_analysis(message, context["contexts"])
+            if analysis:
+                message = analysis["observation"] + (f" {analysis['next_step']}" if analysis["next_step"] else "")
+            else:
+                message = "AI feedback could not be read reliably. Observer will retry when there is new activity."
+            result = {"source": "minimax" if provider == "minimax" else "local_ai", "model": model, "feedback": message, "analysis": analysis, "contexts": context["contexts"] if analysis else [], "timestamp": time.time(), "session_id": session["id"], "automatic": automatic}
             with self.lock:
                 self.ai_history["latest"] = result
                 self.ai_history["last_success"] = result["timestamp"]
@@ -419,7 +485,7 @@ class DashboardState:
         with self.lock:
             latest_ai = self.ai_history["latest"]
             last_error = self.ai_history["last_error"]
-        if not behavior_summary["session"] or not latest_ai or latest_ai.get("session_id") != behavior_summary["session"]["id"]:
+        if not behavior_summary["session"] or not latest_ai or latest_ai.get("session_id") != behavior_summary["session"]["id"] or "analysis" not in latest_ai:
             latest_ai = None
         return {
             "status": status,
