@@ -3,6 +3,13 @@
 Observer AI is a local activity dashboard. It stores its observations in
 `data/observer.db`.
 
+## License
+
+The source is available under the [PolyForm Noncommercial License 1.0.0](LICENSE.md).
+You may view, use, modify, and redistribute it for permitted noncommercial
+purposes. Commercial use requires separate permission from the project owner.
+This is a source-available license, not an OSI-approved open-source license.
+
 ## Start
 
 On Windows, double-click **Start Observer Dashboard.bat**. The dashboard opens
